@@ -59,7 +59,7 @@ class Player
         var card = cards.CardsInHand().OrderBy(c => c.Cost).First();
         if (card.Cost <= _player.Mana)
         {
-            Console.Error.WriteLine("Test");
+            Console.Error.WriteLine("Test piggo");
             commands.Add($"SUMMON {card.InstanceId}");
         }
 
