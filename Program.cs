@@ -11,68 +11,84 @@ using System.Collections.Generic;
  **/
 class Player
 {
-    private static int _draftCounter;
-    private static PlayerStats _player;
-    private static PlayerStats _enemy;
+    private static PlayerStats _playerStats;
+    private static int _turnCount;
 
     static void Main(string[] args)
     {
         string[] inputs;
-        _draftCounter = 0;
+        _turnCount = 0;
         // game loop
         while (true)
         {
-            SetupPlayers();
+            for (int i = 0; i < 2; i++)
+            {
+                inputs = Console.ReadLine().Split(' ');
 
-            var cards = new Cards();
+                if (i == 0)
+                {
+                    _playerStats = new PlayerStats(inputs);
+                }
+                var player = new PlayerStats(inputs);
+            }
             int opponentHand = int.Parse(Console.ReadLine());
             int cardCount = int.Parse(Console.ReadLine());
+
+
+            var cards = new Cards();
             for (int i = 0; i < cardCount; i++)
             {
                 inputs = Console.ReadLine().Split(' ');
-                var card = new Card(inputs);
-                cards.Add(card);
+
+                cards.Add(new Card(inputs, i));
             }
 
-            if (IsDraftPhase())
-                DraftPhase(cards);
+            if (_turnCount < 30)
+            {
+                ChoosePick(cards);
+            }
             else
-                ActForTurn(cards);
+            {
+                PlayTurn(cards);
+            }
+
+            _turnCount++;
         }
     }
 
-    private static void SetupPlayers()
+    private static void ChoosePick(Cards cards)
     {
-        for (int i = 0; i < 2; i++)
+        if (_turnCount > 10)
         {
-            var inputs = Console.ReadLine().Split(' ');
-            if (i == 0)
-                _player = new PlayerStats(inputs);
-            else
-                _enemy = new PlayerStats(inputs);
+            var cheapestCard = cards.OrderBy(p => p.Cost).First();
+            Console.WriteLine($"PICK {cheapestCard.Index}");
+        }
+        else if (_turnCount >= 10 && _turnCount < 20)
+        {
+            var middleCard = cards.Where(p => p.Cost >= 4 && p.Cost <= 8).FirstOrDefault();
+            if (middleCard == null)
+                middleCard = cards.OrderByDescending(p => p.Cost).First();
+            Console.WriteLine($"PICK {middleCard.Index}");
+        }
+        else
+        {
+            var cheapestCard = cards.OrderByDescending(p => p.Cost).First();
+            Console.WriteLine($"PICK {cheapestCard.Index}");
         }
     }
 
-    private static void ActForTurn(Cards cards)
+    private static void PlayTurn(Cards cards)
     {
+
         var commands = new List<string>();
-        var card = cards.CardsInHand().OrderBy(c => c.Cost).First();
-        if (card.Cost <= _player.Mana)
-        {
-            Console.Error.WriteLine("Test piggo");
-            commands.Add($"SUMMON {card.InstanceId}");
-        }
 
-        foreach (var attackingCard in cards.Where(c => c.Location == 1))
-        {
-            commands.Add($"ATTACK {attackingCard.InstanceId} -1");
-        }
+        SummonCards(cards, commands);
 
-        var finalExecution = string.Join(";", commands);
-
+        Attack(cards, commands);
 
         if (commands.Any())
         {
+            var finalExecution = string.Join(";", commands);
             Console.Error.WriteLine(finalExecution);
             Console.WriteLine(finalExecution);
         }
@@ -82,96 +98,88 @@ class Player
         }
     }
 
-    private static bool IsDraftPhase()
+    private static void Attack(Cards cards, List<string> commands)
     {
-        return _draftCounter < 30;
-    }
-
-    private static void DraftPhase(List<Card> cards)
-    {
-        while (IsDraftPhase())
+        foreach (var attackingCard in cards.Where(c => c.Location == 1))
         {
-            Console.Error.WriteLine($"{cards.Count}");
-            var cardsToChoose = cards.Skip(_draftCounter).Take(3);
-
-            var card = cardsToChoose.OrderBy(p => p.Cost).FirstOrDefault();
-
-            if (card != null)
-                Console.WriteLine($"PICK {card.CardDraw}");
-            else
+            var guardCard = cards.Where(p => p.Location == -1 && p.IsGuard && p.Defense > 0).FirstOrDefault();
+            var targetId = -1;
+            if (guardCard != null)
             {
-                Console.WriteLine("PICK 0");
+                guardCard.Defense = guardCard.Defense - attackingCard.Attack;
+                targetId = guardCard.InstanceId;
             }
-            _draftCounter++;
-
+            
+            commands.Add($"ATTACK {attackingCard.InstanceId} {targetId}");
         }
     }
 
+    private static void SummonCards(Cards cards, List<string> commands)
+    {
+        var highestCardThatCanBeSummoned = cards.Where(p => p.Location == 0 && p.Cost <= _playerStats.PlayerMana).OrderByDescending(p => p.Cost).FirstOrDefault();
 
+        if (highestCardThatCanBeSummoned != null)
+        {
+            commands.Add($"SUMMON {highestCardThatCanBeSummoned.InstanceId}");
+            if (highestCardThatCanBeSummoned.IsCharge())
+            {
+                highestCardThatCanBeSummoned.Location = 0;
+            }
+        }
+    }
 }
 
-
-public class PlayerStats
+internal class PlayerStats
 {
+    public int PlayerMana { get; }
+
     public PlayerStats(string[] inputs)
     {
-        Health = int.Parse(inputs[0]);
-        Mana = int.Parse(inputs[1]);
-        Deck = int.Parse(inputs[2]);
-        Rune = int.Parse(inputs[3]);
+        int playerHealth = int.Parse(inputs[0]);
+        PlayerMana = int.Parse(inputs[1]);
+        int playerDeck = int.Parse(inputs[2]);
+        int playerRune = int.Parse(inputs[3]);
     }
-
-    public int Health { get; set; }
-
-    public int Mana { get; set; }
-
-    public int Deck { get; set; }
-
-    public int Rune { get; set; }
 }
 
-
-public class Cards : List<Card>
+internal class Cards : List<Card>
 {
-    public IEnumerable<Card> CardsInHand()
-    {
-        return this.Where(c => c.Location == 0);
-    }
-
 }
 
-public class Card
+internal class Card
 {
-    public Card(string[] inputs)
+    public int Index { get; }
+
+    public Card(string[] inputs, int i)
     {
-        CardNumber = int.Parse(inputs[0]);
+        Index = i;
+        int cardNumber = int.Parse(inputs[0]);
         InstanceId = int.Parse(inputs[1]);
         Location = int.Parse(inputs[2]);
         int cardType = int.Parse(inputs[3]);
         Cost = int.Parse(inputs[4]);
         Attack = int.Parse(inputs[5]);
         Defense = int.Parse(inputs[6]);
-        string abilities = inputs[7];
-        MyHealthChange = int.Parse(inputs[8]);
-        OpponentHealthChange = int.Parse(inputs[9]);
-        CardDraw = int.Parse(inputs[10]);
+        Abilities = inputs[7];
+        int myHealthChange = int.Parse(inputs[8]);
+        int opponentHealthChange = int.Parse(inputs[9]);
+        int cardDraw = int.Parse(inputs[10]);
     }
-
-    public int InstanceId { get; set; }
-
-    public int CardNumber { get; set; }
-
-    public int Location { get; set; }
 
     public int Defense { get; set; }
 
+    public string Abilities { get; set; }
+
+    public int InstanceId { get; }
+
+    public int Location { get; set; }
+
+    public int Cost { get; }
+    public bool IsGuard => Abilities.Contains("G");
     public int Attack { get; set; }
 
-    public int CardDraw { get; set; }
-
-    public int OpponentHealthChange { get; set; }
-
-    public int MyHealthChange { get; set; }
-
-    public int Cost { get; set; }
+    public bool IsCharge()
+    {
+        return Abilities.Contains("C");
+    }
 }
