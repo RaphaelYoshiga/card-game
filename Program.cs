@@ -231,7 +231,7 @@ internal class SimpleAttackStrategy
     {
         foreach (var redItem in _deck.UsableRedItems(deck, _commander.PlayerStats.PlayerMana))
         {
-            if (redItem.Cost == 0 && _turnCount < 4)
+            if (redItem.Cost == 0 && _turnCount < 3)
                 continue;
 
             UseRedItem(deck, redItem);
@@ -247,6 +247,12 @@ internal class SimpleAttackStrategy
 
             if (target != null)
                 UseRedItem(target, redItem);
+        }
+        else if(redItem.Defense < 0)
+        {
+            var target = deck.MyOponentsTableCards().Where(p => p.Defense + redItem.Defense <= 0).OrderByDescending(p => p.Attack).FirstOrDefault();
+            UseItemOn(target, redItem);
+
         }
         else
         {
@@ -345,15 +351,16 @@ internal class SimpleAttackStrategy
         if (target != null)
         {
             var cardDies = target.Attack >= attackingCard.Defense;
-
             if (cardDies && target.Attack < 5)
             {
-                _commands.AttackEnemy(attackingCard);;
+                _commands.AttackEnemy(attackingCard); ;
                 return;
             }
 
             Console.Error.WriteLine($"Card here target {target.InstanceId}");
-            _commands.Add($"ATTACK {attackingCard.InstanceId} {target.InstanceId}");
+
+            target.Location = CardLocation.Dead;
+            _commands.AttackCard(attackingCard, target);
         }
         else
             _commands.AttackEnemy(attackingCard);
@@ -574,6 +581,11 @@ internal class CommandExecutor : List<string>
     public void AttackEnemy(Card attackingCard)
     {
         this.Add($"ATTACK {attackingCard.InstanceId} {-1}");
+    }
+
+    public void AttackCard(Card attackingCard, Card target)
+    {
+        this.Add($"ATTACK {attackingCard.InstanceId} {target.InstanceId}");
     }
 }
 
