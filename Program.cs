@@ -1,5 +1,6 @@
 ﻿using System;
 using System.Collections.Generic;
+using System.Diagnostics;
 using System.Linq;
 
 /**
@@ -42,10 +43,64 @@ class Player
                 cards.Add(new Card(inputs, i));
             }
 
-            var commander = new Commander(cards, _playerStats, _enemyStats, _cardSelector);
-            commander.Play(_turnCount);
+            var gameState = new GameState(cards, _playerStats, _enemyStats);
+            var major = new Major(_cardSelector, gameState);
+            major.Play(_turnCount);
             _turnCount++;
         }
+    }
+}
+
+
+internal class Major
+{
+    private readonly GameState _gameState;
+    private readonly SimpleAttackStrategy _simpleAttackStrategy;
+    private readonly CardSelector _cardSelector;
+    private readonly FinishHimStrategy _finishHimStrategy;
+
+    public Major(CardSelector cardSelector, GameState gameState)
+    {
+        _cardSelector = cardSelector;
+        _simpleAttackStrategy = new SimpleAttackStrategy(gameState);
+        _finishHimStrategy = new FinishHimStrategy(gameState);
+        _gameState = gameState;
+    }
+
+    public void Play(int turnCount)
+    {
+        if (turnCount < 30)
+            _cardSelector.ChoosePick(_gameState.Deck);
+        else
+            PlayTurn(_gameState.Deck, turnCount);
+    }
+
+    private void PlayTurn(Deck deck, int turnCount)
+    {
+        var adjustTurnCount = turnCount - 30;
+        var commands = GetCommands(deck, adjustTurnCount);
+
+        Commands.ExecuteCommands(commands);
+    }
+
+    private List<string> GetCommands(Deck deck, int adjustTurnCount)
+    {
+        var sw = Stopwatch.StartNew();
+        
+
+
+        var analysisResult = _finishHimStrategy.CanWeKillTheEnemy(deck);
+        var finishHimTime = sw.Elapsed;
+
+        if (analysisResult.CanKill)
+            return analysisResult.Commands;
+
+        var sequentialPlay = _simpleAttackStrategy.SequentialPlay(deck, adjustTurnCount, _gameState.Commands);
+
+        var simpleAttackTime = sw.Elapsed;
+
+        Console.Error.WriteLine($"Time taken kill: {finishHimTime.TotalMilliseconds}ms, simple attack {simpleAttackTime.TotalMilliseconds}");
+        return sequentialPlay;
     }
 }
 
@@ -78,42 +133,21 @@ internal class CardSelector
     }
 }
 
-
-internal class Commander
+internal class GameState
 {
-    private readonly SimpleAttackStrategy _simpleAttackStrategy;
-    private readonly CardSelector _cardSelector;
-    public Commands _commands;
     public Deck Deck { get; }
     public PlayerStats Enemy { get; }
     public PlayerStats PlayerStats { get; }
+    public Commands Commands => _commands;
+    private Commands _commands = new Commands();
 
-    public Commander(Deck deck, PlayerStats player, PlayerStats enemy, CardSelector cardSelector)
+    public GameState(Deck deck, PlayerStats player, PlayerStats enemy)
     {
         PlayerStats = player;
         Deck = deck;
-        Enemy = enemy;
-        _cardSelector = cardSelector;
-        _simpleAttackStrategy = new SimpleAttackStrategy(this);
+        Enemy = enemy;        
     }
 
-    public void Play(int turnCount)
-    {
-        if (turnCount < 30)
-            _cardSelector.ChoosePick(Deck);
-        else
-            PlayTurn(Deck, turnCount);
-    }
-
-
-    private void PlayTurn(Deck deck, int turnCount)
-    {
-        var adjustTurnCount = turnCount - 30;
-        _commands = new Commands();
-        var commands = _simpleAttackStrategy.SequentialPlay(deck, adjustTurnCount, _commands);
-
-        Commands.ExecuteCommands(commands);
-    }
 
     public void UseGreenItem(Card target, Card item)
     {
@@ -160,21 +194,33 @@ internal class Commander
         _commands.UseItem(card);
         PlayerStats.ReducePlayerMana(card);
     }
+
+    public bool Attack(Card defendingCard, Card attackingCard)
+    {
+        attackingCard.Engage(defendingCard);
+        _commands.AttackCard(attackingCard, defendingCard);
+        return defendingCard.Location == CardLocation.Dead;
+    }
+
+    public void AttackEnemy(Card attackingCard)
+    {
+        _commands.AttackEnemy(attackingCard);
+    }
 }
 
 internal class SummonerDecider
 {
-    private readonly Commander _commander;
+    private readonly GameState _gameState;
 
-    public SummonerDecider(Commander commander)
+    public SummonerDecider(GameState gameState)
     {
-        _commander = commander;
+        _gameState = gameState;
     }
 
     public void SummonCreatures()
     {
-        var summonList = GetSummonList(_commander.Deck);
-        _commander.Summon(summonList);
+        var summonList = GetSummonList(_gameState.Deck);
+        _gameState.Summon(summonList);
     }
 
     private Deck GetSummonList(Deck deck)
@@ -190,8 +236,8 @@ internal class SummonerDecider
 
     private Deck ExpensiveCards(int tableCount, List<Card> highestCardsThatCanBeSummoned)
     {
-        var expensiveCards = new Deck(_commander.PlayerStats);
-        var playerMana = _commander.PlayerStats.Mana;
+        var expensiveCards = new Deck(_gameState.PlayerStats);
+        var playerMana = _gameState.PlayerStats.Mana;
         foreach (var card in highestCardsThatCanBeSummoned)
         {
             if (card.Cost <= playerMana && NotAboveSummonLimit(tableCount, expensiveCards))
@@ -208,8 +254,8 @@ internal class SummonerDecider
 
     private Deck LookForCheapCards(int tableCount, List<Card> highestCardsThatCanBeSummoned)
     {
-        var mana = _commander.PlayerStats.Mana;
-        var cards = new Deck(_commander.PlayerStats);
+        var mana = _gameState.PlayerStats.Mana;
+        var cards = new Deck(_gameState.PlayerStats);
         foreach (var card in highestCardsThatCanBeSummoned.OrderBy(p => p.Cost))
         {
             if (card.Cost <= mana && NotAboveSummonLimit(tableCount, cards))
@@ -233,127 +279,34 @@ internal class SummonerDecider
 internal class SimpleAttackStrategy
 {
     public const int SummoningLimit = 6;
-    public readonly Commander _commander;
-    public Commands _commands;
-    private Deck _deck;
+    public readonly GameState GameState;
+    public Deck _deck;
     private int _turnCount;
     private readonly SummonerDecider _summonerDecider;
-    private Commands _canKillCommands;
-    private int _canKillTotalCost = 0;
 
-    public SimpleAttackStrategy(Commander commander)
+    public SimpleAttackStrategy(GameState gameState)
     {
-        _commander = commander;
-        _summonerDecider = new SummonerDecider(_commander);
+        GameState = gameState;
+        _summonerDecider = new SummonerDecider(GameState);
+        
     }
 
     public List<string> SequentialPlay(Deck deck, int turnCount, Commands commands)
     {
         _turnCount = turnCount;
         _deck = deck;
-        _commands = commands;
-
-        var analysisResult = CanWeKillTheEnemy(deck);
-        if (analysisResult.CanKill)
-        {
-            foreach (var attackingCard in _deck.MyTableCards())
-                analysisResult.Commands.AttackEnemy(attackingCard);
-
-            return analysisResult.Commands;
-        }
 
         _summonerDecider.SummonCreatures();
         UseRedItems();
         UseGreenItems(deck);
         UseBlueItems();
         Attack(deck);
-        return _commands;
+        return commands;
     }
-
-    public class AnalysisResult
-    {
-        public AnalysisResult(bool canKill)
-        {
-            CanKill = canKill;
-        }
-
-        public AnalysisResult(bool canKill, Commands commands)
-        {
-            CanKill = canKill;
-            Commands = commands;
-        }
-
-        public bool CanKill { get; set; }
-        public Commands Commands { get; set; }
-    }
-
-
-    #region CanWeKill
-    private AnalysisResult CanWeKillTheEnemy(Deck deck)
-    {
-        _canKillTotalCost = 0;
-        _canKillCommands = new Commands();
-        var enemyGuards = deck.EnemyCards().Where(c => c.IsGuard).ToList();
-
-        if (enemyGuards.Any(c => c.IsGuard) && !CanWeRemoveGuardsEasily(enemyGuards))
-            return new AnalysisResult(false);
-
-        int remainingEnemyLife = _commander.Enemy.Life - deck.MyTableCards().Sum(p => p.Attack);
-
-
-        var totalDamage = 0;
-        var items = deck.MyAffordableHandCards().Where(p => p.CardType != CardType.Creature).OrderBy(p => p.Cost);
-        foreach (var item in items)
-        {
-            if (item.CardType == CardType.GreenItem && item.Attack > 0)
-            {
-                if (item.Cost + _canKillTotalCost > _commander.PlayerStats.Mana)
-                {
-                    Console.Error.WriteLine($"Can't kill enemy {remainingEnemyLife}");
-                    return new AnalysisResult(false);
-                }
-
-                _canKillTotalCost += item.Cost;
-                totalDamage += item.OpponentHealthChange * -1 + item.Attack;
-
-                var target = deck.MyTableCards().First();
-                _canKillCommands.UseItem(item, target);
-
-                if (totalDamage >= remainingEnemyLife)
-                    return new AnalysisResult(true, _canKillCommands);
-
-            }
-        }
-
-        Console.Error.WriteLine($"Can't kill enemy {remainingEnemyLife}");
-
-        return new AnalysisResult(false);
-    }
-
-    private bool CanWeRemoveGuardsEasily(List<Card> enemyGuards)
-    {
-        return enemyGuards.All(EasyRemove);
-    }
-
-    private bool EasyRemove(Card target)
-    {
-        var guardRemover = _deck.UsableRedItems().OrderBy(p => p.Cost).FirstOrDefault(c => c.IsGuard);
-        if (guardRemover != null)
-        {
-            _canKillTotalCost += guardRemover.Cost;
-            _canKillCommands.UseItem(guardRemover, target);
-            _commander.UseRedItem(guardRemover, target);
-            return true;
-        }
-
-        return false;
-    }
-
-    #endregion
 
     private void UseGreenItems(Deck deck)
     {
-        foreach (var item in deck.Where(p => p.CardType == CardType.GreenItem && _commander.PlayerStats.Mana >= p.Cost))
+        foreach (var item in deck.Where(p => p.CardType == CardType.GreenItem && GameState.PlayerStats.Mana >= p.Cost))
         {
             UseGreenItem(item);
         }
@@ -364,13 +317,13 @@ internal class SimpleAttackStrategy
         if (item.IsCharge())
         {
             var target = _deck.MyHandCards().Where(p => p.Cost > _turnCount).OrderBy(p => p.Cost).ThenByDescending(p => p.Attack).FirstOrDefault();
-            _commander.UseGreenItem(target, item);
+            GameState.UseGreenItem(target, item);
         }
         else
         {
             var target = _deck.MyTableCards().OrderByDescending(p => p.IsGuard)
                 .ThenByDescending(p => p.Defense).FirstOrDefault();
-            _commander.UseGreenItem(target, item);
+            GameState.UseGreenItem(target, item);
         }
     }
 
@@ -393,24 +346,24 @@ internal class SimpleAttackStrategy
             var target = guardEnemies.FirstOrDefault();
 
             if (target != null)
-                _commander.UseRedItem(redItem, target);
+                GameState.UseRedItem(redItem, target);
         }
         else if (redItem.Defense < 0)
         {
             var target = _deck.EnemyCards().Where(p => p.Defense + redItem.Defense <= 0).OrderByDescending(p => p.Attack).FirstOrDefault();
-            _commander.UseRedItem(redItem, target);
+            GameState.UseRedItem(redItem, target);
         }
         else
         {
             var target = _deck.EnemyCards().OrderByDescending(p => p.Defense).FirstOrDefault();
-            _commander.UseRedItem(redItem, target);
+            GameState.UseRedItem(redItem, target);
         }
     }
 
     private void UseBlueItems()
     {
         foreach (var card in _deck.AffordableBlueItems())
-            _commander.UseBlueItem(card);
+            GameState.UseBlueItem(card);
     }
 
     private void Attack(Deck deck)
@@ -418,7 +371,7 @@ internal class SimpleAttackStrategy
         var attackingCards = deck.MyTableCards().ToList();
         var anyGuard = deck.EnemyCards().Any(c => c.IsGuard);
 
-        if (!anyGuard && _commander.Enemy.Life < attackingCards.Sum(p => p.Attack))
+        if (!anyGuard && GameState.Enemy.Life < attackingCards.Sum(p => p.Attack))
         {
             AttackTheEnemyWith(attackingCards);
             return;
@@ -431,7 +384,7 @@ internal class SimpleAttackStrategy
     private void AttackTheEnemyWith(List<Card> attackingCards)
     {
         foreach (var attackingCard in attackingCards)
-            _commands.AttackEnemy(attackingCard);
+            GameState.AttackEnemy(attackingCard);
     }
 
     private void FocusGuardCards(Deck deck, List<Card> attackingCards)
@@ -453,12 +406,7 @@ internal class SimpleAttackStrategy
             if (attackingCard.IsLethal())
                 AttackWithLetal(attackingCard);
             else
-                _commands.AttackEnemy(attackingCard);
-        }
-
-        foreach (var card in _deck.EnemyCards().OrderBy(p => p.Attack))
-        {
-            Console.Error.WriteLine($"Potential damage {card.Attack} from: {card.InstanceId}");
+                GameState.AttackEnemy(attackingCard);
         }
     }
 
@@ -469,41 +417,129 @@ internal class SimpleAttackStrategy
 
         if (target != null)
         {
-            var cardDies = target.Attack >= attackingCard.Defense;
-            if (cardDies && target.Attack < 5)
+
+            var attackinCardDies = target.Attack >= attackingCard.Defense;
+            var notWorthAttacking = attackinCardDies && target.Attack < 5;
+            if (notWorthAttacking)
             {
-                _commands.AttackEnemy(attackingCard); ;
+                GameState.AttackEnemy(attackingCard);
                 return;
             }
 
-            Console.Error.WriteLine($"Card here target {target.InstanceId}");
-
-            target.Location = CardLocation.Dead;
-            _commands.AttackCard(attackingCard, target);
+            GameState.Attack(target, attackingCard);
         }
         else
-            _commands.AttackEnemy(attackingCard);
+            GameState.AttackEnemy(attackingCard);
     }
 
     private bool Attack(List<Card> attackingCards, Card defendingCard, Card attackingCard)
     {
-        defendingCard.Defense -= attackingCard.Attack;
-        _commands.Add($"ATTACK {attackingCard.InstanceId} {defendingCard.InstanceId}");
         attackingCards.Remove(attackingCard);
 
-        if (defendingCard.Defense <= 0)
-        {
-            defendingCard.Location = CardLocation.Dead;
-            return true;
-        }
-
-        return false;
+        return GameState.Attack(defendingCard, attackingCard);
     }
 
     private static IOrderedEnumerable<Card> EnemyGuardCards(Deck deck)
     {
         return deck.EnemyCards().Where(p => p.IsGuard)
             .OrderBy(p => p.Defense).ThenBy(p => p.Attack);
+    }
+}
+
+internal class FinishHimStrategy
+{
+    private readonly GameState _gameState;
+    private Commands _canKillCommands;
+    private int _canKillTotalCost;
+    private int _totalDamage;
+
+    public FinishHimStrategy(GameState gameState)
+    {
+        _gameState = gameState;
+    }
+
+    public AnalysisResult CanWeKillTheEnemy(Deck deck)
+    {
+        _canKillTotalCost = 0;
+        _totalDamage = 0;
+        _canKillCommands = new Commands();
+
+        var analysisResult = CanKillAnalysis(deck);
+        if (analysisResult.CanKill)
+            FullOutAttack(deck, analysisResult);
+
+        return analysisResult;
+    }
+
+    private static void FullOutAttack(Deck deck, AnalysisResult analysisResult)
+    {
+        foreach (var attackingCard in deck.MyTableCards())
+            analysisResult.Commands.AttackEnemy(attackingCard);
+    }
+
+    private AnalysisResult CanKillAnalysis(Deck deck)
+    {
+        var enemyGuards = deck.EnemyGuards();
+        if (enemyGuards.Any(c => c.IsGuard) && !CanWeRemoveGuardsEasily(enemyGuards))
+            return new AnalysisResult(false);
+
+        var remainingEnemyLife = RemainingEnemyLife(deck);
+        var items = deck.MyAffordableHandCards().Where(p => p.CardType != CardType.Creature).OrderBy(p => p.Cost);
+        foreach (var item in items)
+        {
+            if (CannotAffordItem(item))
+                return new AnalysisResult(false);
+
+            if (item.CardType == CardType.GreenItem && item.Attack > 0)
+            {
+                var result = AnalysisResult(deck, item, remainingEnemyLife);
+                if (result.CanKill)
+                    return result;
+            }
+        }
+
+        return new AnalysisResult(false);
+    }
+
+    private bool CannotAffordItem(Card item)
+    {
+        return item.Cost + _canKillTotalCost > _gameState.PlayerStats.Mana;
+    }
+
+    private AnalysisResult AnalysisResult(Deck deck, Card item, int remainingEnemyLife)
+    {
+        _canKillTotalCost += item.Cost;
+        _totalDamage += item.OpponentHealthChange * -1 + item.Attack;
+
+        var target = deck.MyTableCards().FirstOrDefault();
+        if (target != null)
+            _canKillCommands.UseItem(item, target);
+
+        var canKill = _totalDamage >= remainingEnemyLife;
+        return new AnalysisResult(canKill, _canKillCommands);
+    }
+
+    private int RemainingEnemyLife(Deck deck)
+    {
+        return _gameState.Enemy.Life - deck.MyTableCards().Sum(p => p.Attack);
+    }
+
+    private bool CanWeRemoveGuardsEasily(List<Card> enemyGuards)
+    {
+        return enemyGuards.All(EasyGuardRemove);
+    }
+
+    private bool EasyGuardRemove(Card target)
+    {
+        var guardRemover = _gameState.Deck.UsableRedItems().OrderBy(p => p.Cost).FirstOrDefault(c => c.IsGuard);
+        if (guardRemover == null)
+            return false;
+
+        _canKillTotalCost += guardRemover.Cost;
+        _canKillCommands.UseItem(guardRemover, target);
+        _gameState.UseRedItem(guardRemover, target);
+        return true;
+
     }
 }
 
@@ -553,13 +589,33 @@ internal class Deck : List<Card>
     {
         return this.Where(p => p.Location == CardLocation.MyHand);
     }
+
+    public List<Card> EnemyGuards()
+    {
+        return this.EnemyCards().Where(c => c.IsGuard).ToList();
+    }
 }
 #region Card
 
-internal class Card
+public class Card :ICloneable
 {
     private const char NonAbility = '-';
     public int Index { get; }
+
+    public Card(Card card)
+    {
+        Index = card.Index;
+        InstanceId = card.InstanceId;
+        Location = card.Location;
+        CardType = card.CardType;
+        Cost = card.Cost;
+        Attack = card.Attack;
+        Defense = card.Defense;
+        Abilities = card.Abilities;
+        MyHealthChange = card.MyHealthChange;
+        OpponentHealthChange = card.OpponentHealthChange;
+        CardDraw = card.CardDraw;
+    }
 
     public Card(string[] inputs, int i)
     {
@@ -609,8 +665,15 @@ internal class Card
     private decimal ScoreWithoutCost()
     {
         var abilities = GetAbilitiesScore();
-        var cardTypeBonus = CardType == CardType.Creature ? 0 : 1;
         var healthChanges = MyHealthChange + OpponentHealthChange * -1;
+
+        if (CardType == CardType.RedItem)
+        {
+            return 1 + Attack * -1 + Defense * -1 + CardDraw + healthChanges;
+        }
+
+        var cardTypeBonus = CardType == CardType.Creature ? 0 : 1;
+
         var attack = Attack * 1.5m;
         if (attack == 0)
             attack = -2;
@@ -691,11 +754,41 @@ internal class Card
         if (item.Defense * -1 >= Defense)
             Location = CardLocation.Dead;
     }
+
+    public void Engage(Card defendingCard)
+    {
+        if (defendingCard.IsWard())
+        {
+            defendingCard.RemoveWard();
+            return;
+        }
+
+        if (IsLethal())
+        {
+            defendingCard.Location = CardLocation.Dead;
+            return;
+        }
+
+        defendingCard.Defense -= Attack;
+        if (defendingCard.Defense <= 0)
+            defendingCard.Location = CardLocation.Dead;
+
+    }
+
+    private void RemoveWard()
+    {
+        Abilities = Abilities.Replace('w', '-');
+    }
+
+    public object Clone()
+    {
+        return new Card(this);
+    }
 }
 
 #endregion
 
-internal enum CardType
+public enum CardType
 {
     Creature = 0,
     GreenItem = 1,
@@ -703,7 +796,7 @@ internal enum CardType
     BlueItem = 3
 }
 
-internal enum CardLocation
+public enum CardLocation
 {
     MyHand = 0,
     Table = 1,
@@ -711,7 +804,7 @@ internal enum CardLocation
     Dead = -2
 }
 
-internal class Commands : List<string>
+public class Commands : List<string>
 {
     public static void ExecuteCommands(List<string> commands)
     {
@@ -745,7 +838,24 @@ internal class Commands : List<string>
     }
 }
 
-internal class PlayerStats
+public class AnalysisResult
+{
+    public AnalysisResult(bool canKill)
+    {
+        CanKill = canKill;
+    }
+
+    public AnalysisResult(bool canKill, Commands commands)
+    {
+        CanKill = canKill;
+        Commands = commands;
+    }
+
+    public bool CanKill { get; set; }
+    public Commands Commands { get; set; }
+}
+
+internal class PlayerStats : ICloneable
 {
     public PlayerStats(string[] inputs)
     {
@@ -755,6 +865,12 @@ internal class PlayerStats
         int playerRune = int.Parse(inputs[3]);
     }
 
+    private PlayerStats(PlayerStats inputs)
+    {
+        Life = inputs.Life;
+        Mana = inputs.Mana;
+    }
+
     public int Mana { get; set; }
 
     public int Life { get; set; }
@@ -762,5 +878,10 @@ internal class PlayerStats
     public void ReducePlayerMana(Card card)
     {
         Mana -= card.Cost;
+    }
+
+    public object Clone()
+    {
+        return new PlayerStats(this);
     }
 }
